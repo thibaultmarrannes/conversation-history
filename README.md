@@ -14,6 +14,9 @@ This project is a conversational AI web application that allows users to chat wi
 - Neo4j (local or remote)
 - OpenAI API key (or compatible LLM API)
 
+**Important:**
+- The Neo4j database should have the **Graph Data Science (GDS)** plugin and the **APOC** plugin installed and enabled. You can install these from the Neo4j Desktop dashboard (Plugins tab for your database). These plugins are required for advanced graph and vector operations.
+
 ## Setup
 1. **Clone the repository**
 2. **Install dependencies** (see requirements.txt)

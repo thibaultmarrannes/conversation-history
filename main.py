@@ -10,8 +10,16 @@ from fastapi.staticfiles import StaticFiles
 
 from pydantic import BaseModel
 import uvicorn
-from graph import log_question_only, log_answer_only, fetch_session_history, summarize_user_history
+
+from graph import log_question_only, log_answer_only, fetch_session_history, summarize_user_history, get_relevant_context
 from llm import call_openai
+
+# Ensure vector indexes exist in Neo4j at startup
+try:
+    from init import ensure_vector_indexes
+    ensure_vector_indexes()
+except Exception as e:
+    print(f"[WARNING] Could not ensure Neo4j vector indexes: {e}")
 
 load_dotenv()
 
@@ -68,6 +76,8 @@ async def echo_prompt(request: PromptRequest):
     history = fetch_session_history(request.session_id)
     # Fetch user summary and add to context window
     summary = summarize_user_history(request.user_id, call_openai)
+    # Fetch highly relevant content and add to context window
+    relevant_context = get_relevant_context(request.user_id, request.prompt)
     # Debug: log length and content of history
     print(f"[DEBUG] History length: {len(history)}")
     for idx, msg in enumerate(history):
@@ -93,15 +103,31 @@ async def echo_prompt(request: PromptRequest):
             context_lines.append(f"{prefix} {msg['text']}")
         prompt_sections.append("If it helps, this is some context regarding the conversation so far:\n" + "\n".join(context_lines))
 
-    # 3. Some extra context is this summary that I have about the user. Only use it if it helps to answer the question
+    # 3. Add most relevant context for this query
+    if relevant_context:
+        rel_lines = []
+        for item in relevant_context:
+            rel_lines.append(f"User: {item['question']}")
+            if item['answer']:
+                rel_lines.append(f"Assistant: {item['answer']} (score: {item['score']:.2f})")
+        prompt_sections.append("These are the most relevant questions and answers from the past for this query:\n" + "\n".join(rel_lines))
+
+    # 4. Some extra context is this summary that I have about the user. Only use it if it helps to answer the question
     if summary:
         prompt_sections.append("Some extra context is this summary that I have about the user. Only use it if it helps to answer the question:\n" + summary.strip())
 
     full_prompt = "\n\n".join(prompt_sections)
-    # Log the prompt context and answer to history.log
+    # Log the relevant context, prompt, and answer to history.log
     answer = call_openai(full_prompt)
     with open("history.log", "a") as log_file:
         log_file.write(f"user_id={request.user_id}, session_id={request.session_id}\n")
+        if relevant_context:
+            rel_lines = []
+            for item in relevant_context:
+                rel_lines.append(f"User: {item['question']}")
+                if item['answer']:
+                    rel_lines.append(f"Assistant: {item['answer']} (score: {item['score']:.2f})")
+            log_file.write("Most relevant questions and answers for this query (vector search):\n" + "\n".join(rel_lines) + "\n")
         log_file.write(f"PROMPT TO LLM:\n{full_prompt}\n")
         log_file.write(f"Assistant: {answer}\n")
         log_file.write(f"{'-'*40}\n")

@@ -1,6 +1,8 @@
 
+
 import os
 from neo4j import GraphDatabase
+import llm
 
 
 def get_driver():
@@ -101,7 +103,55 @@ def summarize_user_history(user_id: int, call_openai_func):
         return summary_content
     driver.close()
 
-    
+def get_relevant_context(user_id: int, query: str):
+    """
+    Fetch highly relevant content from the user's history based on the query.
+    Uses vector similarity search to find the most relevant Question and Answer nodes.
+    Returns a list of dicts: [{type: 'question'/'answer', text: ..., score: ...}, ...]
+    """
+    # Get embedding for the query
+    query_embedding = llm.get_embedding(query)
+    driver = get_driver()
+    results = []
+    try:
+        with driver.session() as session:
+            # Search Questions (with combined Q&A embedding)
+            q_result = session.run(
+                """
+                MATCH (u:User {user_id: $user_id})-[:HAS_SESSION]->(:Session)-[:HAS_MESSAGE]->(q:Question)
+                MATCH (q)-[:HAS_ANSWER]->(a:Answer)
+                WHERE q.embedding IS NOT NULL AND size(coalesce(q.embedding, [])) > 0
+                WITH q, a, gds.similarity.cosine(q.embedding, $query_embedding) AS score
+                RETURN q.text AS question, a.text AS answer, score
+                ORDER BY score DESC
+                LIMIT 5
+                """,
+                user_id=user_id, query_embedding=query_embedding
+            )
+            for record in q_result:
+                results.append({
+                    "question": record["question"],
+                    "answer": record["answer"],
+                    "score": record["score"]
+                })
+    except Exception as e:
+        import traceback
+        with open("error.log", "a") as f:
+            f.write("\n--- Exception in get_relevant_context ---\n")
+            f.write(f"user_id: {user_id}, query: {query}\n")
+            f.write(f"Exception: {repr(e)}\n")
+            f.write("Traceback:\n")
+            f.write(traceback.format_exc())
+        if "gds.similarity.cosine" in str(e) or "Cannot invoke \"java.util.List.size()\" because \"vector1\" is null" in str(e):
+            driver.close()
+            return []
+        else:
+            driver.close()
+            raise
+    driver.close()
+    # Sort all results by score descending and return top 5 overall
+    results.sort(key=lambda x: x["score"], reverse=True)
+    return results[:5]
 
 def ensure_user_and_session(tx, user_id: str, session_id: str):
     tx.run(
@@ -114,7 +164,9 @@ def ensure_user_and_session(tx, user_id: str, session_id: str):
     )
 
 def log_question(tx, user_id: str, session_id: str, prompt: str, timestamp: str):
-    # Create Question node, link to session, maintain order, update LAST_MESSAGE
+    # Create Question node, link to session, maintain order, update LAST_MESSAGE, and store embedding
+    embedding = llm.get_embedding(prompt)
+    # For now, create the Question node without embedding; embedding will be updated after answer is available
     tx.run(
         """
         MATCH (s:Session {session_id: $session_id})
@@ -133,15 +185,36 @@ def log_question(tx, user_id: str, session_id: str, prompt: str, timestamp: str)
     )
 
 def log_answer(tx, session_id: str, answer: str, timestamp: str):
-    # Create Answer node, link to last Question, and update relationships
-    tx.run(
-        """
-        MATCH (s:Session {session_id: $session_id})-[:LAST_MESSAGE]->(q:Question)
-        CREATE (a:Answer {text: $answer, timestamp: $timestamp})
-        MERGE (q)-[:HAS_ANSWER]->(a)
-        """,
-        session_id=session_id, answer=answer, timestamp=timestamp
-    )
+    # Create Answer node, link to last Question, update relationships, and store embedding
+    # Find the last Question node for this session
+    # Get the question text
+    from neo4j.exceptions import ServiceUnavailable
+    try:
+        result = tx.run(
+            """
+            MATCH (s:Session {session_id: $session_id})-[:LAST_MESSAGE]->(q:Question)
+            RETURN q.text AS question_text, q
+            """,
+            session_id=session_id
+        )
+        record = result.single()
+        if record:
+            question_text = record["question_text"]
+            # Combine Q and A for embedding
+            combined = f"Q: {question_text}\nA: {answer}"
+            embedding = llm.get_embedding(combined)
+            # Create Answer node, link to Question, store embedding on Q node
+            tx.run(
+                """
+                MATCH (s:Session {session_id: $session_id})-[:LAST_MESSAGE]->(q:Question)
+                CREATE (a:Answer {text: $answer, timestamp: $timestamp})
+                MERGE (q)-[:HAS_ANSWER]->(a)
+                SET q.embedding = $embedding
+                """,
+                session_id=session_id, answer=answer, timestamp=timestamp, embedding=embedding
+            )
+    except ServiceUnavailable:
+        pass
 
 
 def log_question_only(user_id: str, session_id: str, prompt: str):
