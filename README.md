@@ -79,17 +79,3 @@ LIMIT 5
 
 ## License
 MIT
-  -[:HAS_SUMMARY]->(:Summary {text: "User asked about Python and greetings..."})
-```
-
-### Visual Overview
-- **User**
-  - HAS_SESSION → **Session**
-    - HAS_QUESTION → **Question**
-      - HAS_ANSWER → **Answer**
-    - HAS_SUMMARY → **Summary**
-
-### Notes
-- Each session is a separate conversation thread for a user.
-- Questions and answers are always paired and linked in order.
-- Summaries are optional and can be used for context window management or quick overviews.
